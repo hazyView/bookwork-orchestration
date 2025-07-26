@@ -1,0 +1,163 @@
+name: Bookwork Stack CI/CD
+
+on:
+    workflow_dispatch:
+        inputs:
+            deploy_api:
+                description: "Deploy API to Cloud Run?"
+                required: true
+                default: "false"
+                type: choice
+                options:
+                    - "true"
+                    - "false"
+            deploy_frontend:
+                description: "Deploy Frontend to Cloud Run?"
+                required: true
+                default: "false"
+                type: choice
+                options:
+                    - "true"
+                    - "false"
+            deploy_infra:
+                description: "Deploy Infrastructure?"
+                required: true
+                default: "false"
+                type: choice
+                options:
+                    - "true"
+                    - "false"
+
+env:
+    PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+    REGION: ${{ secrets.GCP_REGION }}
+    API_IMAGE: ${{ secrets.API_IMAGE }}
+    FRONTEND_IMAGE: ${{ secrets.FRONTEND_IMAGE }}
+
+jobs:
+    setup:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout orchestration repository
+              uses: actions/checkout@v4
+
+            - name: Set up Google Cloud SDK
+              uses: google-github-actions/setup-gcloud@v4
+              with:
+                project_id: ${{ secrets.GCP_PROJECT_ID }}
+                service_account_key: ${{ secrets.GCP_SA_KEY }}
+                export_default_credentials: true
+
+    build-and-push-api:
+     if: ${{ github.event.inputs.deploy_api == 'true' }}
+     runs-on: ubuntu-latest
+     needs: setup
+     steps:
+      - name: Checkout API repo
+        uses: actions/checkout@v4
+        with:
+          repository: hazyView/bookwork-api
+          path: bookwork-api
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Build and push API Docker image
+        run: |
+          cd bookwork-api
+          docker build --platform=linux/amd64 -t us-central1-docker.pkg.dev/$PROJECT_ID/bookwork-api/api:${{ github.sha }} .
+          docker push us-central1-docker.pkg.dev/$PROJECT_ID/bookwork-api/api:${{ github.sha }}
+
+      - name: Deploy API to Cloud Run
+        run: |
+          gcloud run deploy bookwork-api \
+            --image $API_IMAGE:${{ github.sha }} \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --project $PROJECT_ID
+
+    build-and-push-frontend:
+     if: ${{ github.event.inputs.deploy_frontend == 'true' }}
+     runs-on: ubuntu-latest
+     needs: setup
+     steps:
+      - name: Checkout Frontend repo
+        uses: actions/checkout@v4
+        with:
+          repository: hazyView/bookwork-frontend
+          path: bookwork-frontend
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          cd bookwork-frontend
+          npm ci
+
+      - name: Build frontend
+        run: |
+          cd bookwork-frontend
+          npm run build
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Build and push Frontend Docker image
+        run: |
+          cd bookwork-frontend
+          docker build --platform=linux/amd64 -t us-central1-docker.pkg.dev/$PROJECT_ID/bookwork-frontend/frontend:${{ github.sha }} .
+          docker push us-central1-docker.pkg.dev/$PROJECT_ID/bookwork-frontend/frontend:${{ github.sha }}
+
+      - name: Deploy Frontend to Cloud Run
+        run: |
+          gcloud run deploy bookwork-frontend \
+            --image $FRONTEND_IMAGE:${{ github.sha }} \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --project $PROJECT_ID
+
+    deploy-infra:
+     if: ${{ github.event.inputs.deploy_infra == 'true' }}
+     runs-on: ubuntu-latest
+     needs: setup
+     steps:
+      - name: Checkout Infra repo
+        uses: actions/checkout@v4
+        with:
+          repository: hazyView/bookwork-infra-gcp
+          path: bookwork-infra-gcp
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: |
+          cd bookwork-infra-gcp
+          terraform init
+
+      - name: Terraform Plan
+        run: |
+          cd bookwork-infra-gcp
+          terraform plan
+
+      - name: Terraform Apply
+        run: |
+          cd bookwork-infra-gcp
+          terraform apply -auto-approve \
+            -var="api_image_tag=${{ github.sha }}" \
+            -var="frontend_image_tag=${{ github.sha }}"
+              
+
